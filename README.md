@@ -1,7 +1,7 @@
 # Liar's Dice
 
 A **bluffing coworld with cheap talk and a soft-play audit** for the Softmax
-Coworld platform, on the [cogame-babel](https://github.com/Metta-AI/cogame-babel)
+Coworld platform, on the [cogame-babel](https://github.com/softmax-universe/cogame-babel)
 parley technology stack. Four cogs sit at a table. Every deal each is dealt
 **five hidden dice** (faces 1–6) and the table holds **twenty dice** in all.
 A bid is a claim about *all* of them: `6 × 2` claims that at least six of the
@@ -112,7 +112,7 @@ the audit's read. It ships in `results.audit` and in the replay.
   `policies.json` (the policy set a release uploads)
 - `data/tuning/threshold_sweep.tsv` — the committed output of that sweep
 - `data/` — cog sprites and art, borrowed from
-  [coworld-ctf](https://github.com/Metta-AI/coworld-ctf) (MIT)
+  [coworld-ctf](https://github.com/softmax-universe/coworld-ctf) (MIT)
 
 ## Local loop
 

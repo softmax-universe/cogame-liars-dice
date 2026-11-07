@@ -54,7 +54,7 @@ fallback turns remain in the underlying episodes. Seed families stay within a sp
 Files are created under umask 077, episode writes are exclusive, and existing
 outputs are refused. Private corpora are excluded from Docker and Git.
 
-Use the [post-training research package](https://github.com/Metta-AI/posttraining-research/tree/main/packages/metta-posttraining)
+Use the [post-training research package](https://github.com/softmax-universe/posttraining-research/tree/main/packages/metta-posttraining)
 to import and independently review complete episodes, then split by seed family
 before exporting selected training examples. Runtime, training, and evaluation must use the same manifest variant,
 operator prompt, model tokenizer/template, and output/context budgets. Serving a

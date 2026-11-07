@@ -23,7 +23,7 @@
         "/bin/liars-dice"
       ],
       "env": {},
-      "source_url": "https://github.com/Metta-AI/cogame-liars-dice/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
     },
     "config_schema": {
       "allOf": [{
@@ -433,7 +433,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-liars-dice/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
     },
     {
       "id": "liars-dice-bayes",
@@ -456,7 +456,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-liars-dice/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
     },
     {
       "id": "liars-dice-pressure",
@@ -479,7 +479,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-liars-dice/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
     }
   ],
   "variants": [
