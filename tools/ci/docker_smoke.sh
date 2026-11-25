@@ -66,8 +66,13 @@ prefix="${slug}-smoke-${run_id}"
 network="${prefix}-net"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/${slug}-smoke.XXXXXX")"
 seats=0
+mock_llm_pid=""
 
 cleanup() {
+  if [ -n "${mock_llm_pid}" ]; then
+    kill "${mock_llm_pid}" >/dev/null 2>&1 || true
+    wait "${mock_llm_pid}" >/dev/null 2>&1 || true
+  fi
   docker ps -aq --filter "name=${prefix}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}"
@@ -166,8 +171,9 @@ extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    entry_env = dict(entry.get("env") or {})
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
     for kv in extra_env:
         env_args += ["-e", kv]
@@ -176,6 +182,8 @@ for slot in range(seats):
         fh.write(" ".join(shlex.quote(a) for a in env_args))
     with open(os.path.join(work, f"cmd-{slot}.args"), "w") as fh:
         fh.write(" ".join(shlex.quote(a) for a in argv))
+    with open(os.path.join(work, f"llm-{slot}.flag"), "w") as fh:
+        fh.write("1" if entry_env.get("COWORLD_LLM_ENABLED") == "true" else "0")
     print(f"slot {slot}: player_id={player_id or '(default)'} run={argv} env={len(env_args) // 2}")
 
 with open(os.path.join(work, "seats"), "w") as fh:
@@ -187,6 +195,51 @@ seats="$(cat "${work_dir}/seats")"
 chmod 777 "${work_dir}"
 
 # --------------------------------------------------------------------------
+# Credential-free local HTTP fixture for CI only (never in the manifest).
+# --------------------------------------------------------------------------
+needs_llm_slot=0
+for ((slot = 0; slot < seats; slot++)); do
+  if [ "$(cat "${work_dir}/llm-${slot}.flag")" = "1" ]; then
+    needs_llm_slot=1
+  fi
+done
+
+llm_player_env=()
+llm_docker_args=()
+if [ "${needs_llm_slot}" = "1" ]; then
+  if [ -n "${COWORLD_LLM_ENDPOINT:-}" ]; then
+    llm_player_env+=(-e "COWORLD_LLM_ENDPOINT=${COWORLD_LLM_ENDPOINT}")
+    echo "forwarding host COWORLD_LLM_ENDPOINT to model player containers"
+  elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    llm_player_env+=(-e "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+    echo "forwarding host OPENROUTER_API_KEY to model player containers"
+  else
+    python3 "${script_dir}/mock_llm_server.py" \
+      --host 0.0.0.0 \
+      --port 0 \
+      --port-file "${work_dir}/mock_llm.port" \
+      --log-file "${work_dir}/mock_llm.jsonl" \
+      >"${work_dir}/mock_llm.log" 2>&1 &
+    mock_llm_pid="$!"
+    for _ in $(seq 1 50); do
+      if [ -s "${work_dir}/mock_llm.port" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+    test -s "${work_dir}/mock_llm.port" || {
+      echo "FAIL: local CI mock LLM fixture did not start" >&2
+      cat "${work_dir}/mock_llm.log" >&2 || true
+      exit 1
+    }
+    mock_port="$(cat "${work_dir}/mock_llm.port")"
+    llm_docker_args+=(--add-host=host.docker.internal:host-gateway)
+    llm_player_env+=(-e "COWORLD_LLM_ENDPOINT=http://host.docker.internal:${mock_port}")
+    echo "started credential-free CI mock LLM fixture on port ${mock_port}"
+  fi
+fi
+
+# --------------------------------------------------------------------------
 # Launch.
 # --------------------------------------------------------------------------
 docker network create "${network}" >/dev/null
@@ -194,9 +247,7 @@ docker network create "${network}" >/dev/null
 game_env=()
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   game_env+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
-  echo "ANTHROPIC_API_KEY present: the LLM path will be exercised"
-else
-  echo "no ANTHROPIC_API_KEY: the game must complete on its scripted baselines"
+  echo "ANTHROPIC_API_KEY present: forwarded to game container"
 fi
 
 echo "starting game container (${image} ${game_bin}) ..."
@@ -215,9 +266,17 @@ docker run -d --name "${prefix}-game" \
 for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
+  extra_llm_args=()
+  extra_llm_env=()
+  if [ "$(cat "${work_dir}/llm-${slot}.flag")" = "1" ]; then
+    extra_llm_args=(${llm_docker_args[@]+"${llm_docker_args[@]}"})
+    extra_llm_env=(${llm_player_env[@]+"${llm_player_env[@]}"})
+  fi
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+    ${extra_llm_args[@]+"${extra_llm_args[@]}"} \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
+    ${extra_llm_env[@]+"${extra_llm_env[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null
 done
 

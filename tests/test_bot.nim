@@ -224,7 +224,7 @@ suite "the LLM path":
     check "\"action\":\"bid\"" notin maxBidPrompt
     check "\"quantity\":" & $(sim.totalSymbols() + 1) notin maxBidPrompt
 
-  test "replies parse strictly and reject aliases, fences, and non-integers":
+  test "replies parse strictly, accept a single markdown fence, and reject prose/aliases/non-integers":
     let config = fixture(seed = 8)
     var sim = initSim(config)
     sim.beginDeal()
@@ -235,11 +235,22 @@ suite "the LLM path":
     check validBid.face == 2
     let validChallenge = parseReply(sim, extractJsonObject("""{"action":"challenge"}"""))
     check validChallenge.action == aChallenge
-    ## Fenced or prose-wrapped JSON is rejected.
-    expect LiarsDiceError:
-      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```")
+    ## A single Markdown presentation fence around the JSON object is accepted.
+    let fencedChallenge = parseReply(sim, extractJsonObject("```json\n{\"action\":\"challenge\"}\n```"))
+    check fencedChallenge.action == aChallenge
+    let plainFencedBid = parseReply(sim, extractJsonObject("```\n{\"action\":\"bid\",\"quantity\":2,\"face\":4}\n```"))
+    check plainFencedBid.action == aBid
+    check plainFencedBid.quantity == 2
+    check plainFencedBid.face == 4
+    ## Prose-wrapped JSON, prose around a fence, and multiple fences are rejected.
     expect LiarsDiceError:
       discard extractJsonObject("Here is my move: {\"action\":\"challenge\"}")
+    expect LiarsDiceError:
+      discard extractJsonObject("Here is my move:\n```json\n{\"action\":\"challenge\"}\n```")
+    expect LiarsDiceError:
+      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```\nDone.")
+    expect LiarsDiceError:
+      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```\n```json\n{\"action\":\"bid\",\"quantity\":1,\"face\":1}\n```")
     ## Obsolete aliases and case-folded actions are rejected.
     for alias in ["BID", "Bid", "raise", "Challenge", "CALL", "call", "liar", "doubt", "ponder"]:
       expect LiarsDiceError:

@@ -390,7 +390,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "liarsdice.player.v2 - JSON text frames over the websocket named by COWORLD_PLAYER_WS_URL (already carrying ?slot=N&token=T). This is a strictly SEQUENTIAL turn game - one decision per turn, for the acting seat only. game->player frames: {\"type\":\"welcome\",\"protocol\":\"liarsdice.player.v2\",\"slot\":N,\"name\":str,\"deals\":int,\"mode\":\"dice|poker\",\"talk\":bool,\"handSize\":int,\"faces\":int} on connect; {\"type\":\"state\",\"slot\":N,\"name\":str,\"seat\":{score,points,wins,losses,bids,challenges},\"deal\":int,\"deals\":int,\"dealsPlayed\":int,\"started\":bool,\"done\":bool,\"reason\":str} after every event; {\"type\":\"observation\",\"event\":int,\"observation\":{...}} on turn for seats registered as external; {\"type\":\"final\",\"done\":true,\"slot\":N,...} at episode end (carrying scores/points/wins/losses/names/deals/reason on completed/deadline episodes, or reason:\"player_failure\" without scores on policy failure), after which the player should exit 0. player->game frames: (1) {\"type\":\"prompt\",\"prompt\":str,\"scripted\":bool,\"baseline\":\"bayes|pressure\"} sent after welcome (prompt max 4000 characters, truncated on rune boundaries; scripted:true requires baseline explicitly set to 'bayes' or 'pressure'; scripted:false drives the seat via the game's LLM transport with no fabricated fallback); or (2) {\"type\":\"register\",\"control\":\"external\"} followed by {\"type\":\"action\",\"event\":int,\"action\":{\"action\":\"bid\",\"quantity\":int,\"face\":int,\"say\"?:str,\"notes\"?:str}|{\"action\":\"challenge\",\"say\"?:str,\"notes\"?:str}} in reply to each observation frame. Invalid, missing, or illegal actions end the episode as an explicit policy failure without fabricating a substitute move or publishing participant scores."
+        "value": "liarsdice.player.v2 - JSON text frames over the websocket named by COWORLD_PLAYER_WS_URL (already carrying ?slot=N&token=T). This is a strictly SEQUENTIAL turn game - one decision per turn, for the acting seat only. game->player frames: {\"type\":\"welcome\",\"protocol\":\"liarsdice.player.v2\",\"slot\":N,\"name\":str,\"deals\":int,\"mode\":\"dice|poker\",\"talk\":bool,\"handSize\":int,\"faces\":int} on connect; {\"type\":\"state\",\"slot\":N,\"name\":str,\"seat\":{score,points,wins,losses,bids,challenges},\"deal\":int,\"deals\":int,\"dealsPlayed\":int,\"started\":bool,\"done\":bool,\"reason\":str} after every event; {\"type\":\"observation\",\"event\":int,\"observation\":{...}} on turn for seats registered as external; {\"type\":\"final\",\"done\":true,\"slot\":N,...} at episode end (carrying scores/points/wins/losses/names/deals/reason on completed/deadline episodes, or reason:\"player_failure\" without scores on policy failure), after which the player should exit 0. player->game frames: (1) {\"type\":\"register\",\"control\":\"external\",\"prompt\"?:str} followed by {\"type\":\"action\",\"event\":int,\"action\":{\"action\":\"bid\",\"quantity\":int,\"face\":int,\"say\"?:str,\"notes\"?:str}|{\"action\":\"challenge\",\"say\"?:str,\"notes\"?:str},\"raw_response\"?:str,\"model\"?:str} (or {\"type\":\"action_error\",\"event\":int,\"error\":str,\"raw_response\"?:str}) in reply to each observation frame - this is how the published liars-dice-model player runs with COWORLD_LLM_ENABLED=true and COWORLD_LLM_MODEL routed to the learner container; or (2) {\"type\":\"prompt\",\"prompt\":str,\"scripted\":bool,\"baseline\":\"bayes|pressure\"} sent after welcome (prompt max 4000 characters, truncated on rune boundaries; scripted:true requires baseline explicitly set to 'bayes' or 'pressure'). Invalid, missing, or illegal actions end the episode as an explicit policy failure without fabricating a substitute move or publishing participant scores."
       },
       "global": {
         "type": "text",
@@ -400,7 +400,7 @@
     "docs": {
       "readme": {
         "type": "text",
-        "value": "Liar's Dice is a bluffing game for four LLM-piloted cogs. Each deal every cog gets five hidden dice; a bid claims that at least N of the twenty dice on the table show a given face. On your turn you either raise strictly (higher quantity, or the same quantity on a higher face) or challenge. A challenge opens every hand: the bidder scores +1 if the bid was true, the challenger +1 if it was a lie, and the loser -1. Eight deals settle the episode and a seat's score is 0.5 + (wins - losses) / (2 x deals), so 0.5 is break even and 1.0 is winning every deal. One line of cheap talk (at most 140 characters) can ride on any action; nothing said is binding. A policy is either a prompt (reusing the published liars-dice-player runnable with PLAYER_PROMPT), an external websocket controller, or an explicitly selected scripted baseline (PLAYER_SCRIPTED=bayes or pressure). Model or external policy failures end the episode as an explicit policy failure without fabricating a move or publishing participant scores."
+        "value": "Liar's Dice is a bluffing game for four LLM-piloted cogs. Each deal every cog gets five hidden dice; a bid claims that at least N of the twenty dice on the table show a given face. On your turn you either raise strictly (higher quantity, or the same quantity on a higher face) or challenge. A challenge opens every hand: the bidder scores +1 if the bid was true, the challenger +1 if it was a lie, and the loser -1. Eight deals settle the episode and a seat's score is 0.5 + (wins - losses) / (2 x deals), so 0.5 is break even and 1.0 is winning every deal. One line of cheap talk (at most 140 characters) can ride on any action; nothing said is binding. The manifest ships an ordinary selectable model policy (liars-dice-model, running /bin/liars-dice-player with COWORLD_LLM_ENABLED=true and COWORLD_LLM_MODEL routed to the learner container), plus two explicit scripted baseline opponents (liars-dice-bayes with PLAYER_SCRIPTED=bayes and liars-dice-pressure with PLAYER_SCRIPTED=pressure). Model or external policy failures end the episode as an explicit policy failure without fabricating a move or publishing participant scores."
       },
       "pages": [
         {
@@ -415,6 +415,30 @@
     }
   },
   "player": [
+    {
+      "id": "liars-dice-model",
+      "name": "Liar's Dice Model Player",
+      "type": "player",
+      "description": "The ordinary selectable model policy: runs /bin/liars-dice-player with COWORLD_LLM_ENABLED=true and COWORLD_LLM_MODEL routed to the learner container, making direct chat-completion calls on each seat observation with no scripted fallback.",
+      "image": "{{LIARS_DICE_IMAGE}}",
+      "run": [
+        "/bin/liars-dice-player"
+      ],
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5"
+      },
+      "resources": {
+        "requests": {
+          "cpu": "100m",
+          "memory": "64Mi"
+        },
+        "limits": {
+          "cpu": "1"
+        }
+      },
+      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
+    },
     {
       "id": "liars-dice-bayes",
       "name": "Liar's Dice Bayes Baseline",
@@ -579,16 +603,16 @@
     },
     "players": [
       {
-        "player_id": "liars-dice-bayes"
-      },
-      {
-        "player_id": "liars-dice-pressure"
+        "player_id": "liars-dice-model"
       },
       {
         "player_id": "liars-dice-bayes"
       },
       {
         "player_id": "liars-dice-pressure"
+      },
+      {
+        "player_id": "liars-dice-bayes"
       }
     ]
   }

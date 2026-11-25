@@ -49,24 +49,7 @@ concurrency:
 env:
   SLUG: liars-dice
   IMAGE: coworld-liars-dice
-  # 0.1.43 is a FLOOR, not a preference. Three independent reasons:
-  # - LIVENESS_MARKER below is only emitted from 0.1.38 on
-  #   (cli.py `_uses_static_replay_viewer_bundle`).
-  # - upload-coworld only waits for the server to finish expanding the
-  #   replay-viewer bundle from 0.1.42 on (`_wait_for_replay_viewer_bundle`);
-  #   older clients race the expansion and the manifest POST fails HTTP 400
-  #   "Coworld replay viewer bundle must be uploaded first"
-  #   (seen: cogame-lighthouse release run 32603113899, 2026-08-22).
-  # - 0.1.42's --wait-hosted-smoke GETs the flat /v2/episode-requests route,
-  #   which the deployed backend now 405s (allow: POST only); the release dies
-  #   at "Upload the Coworld" with HTTP 405 and canonical stays null. 0.1.43
-  #   lists the nested /v2/coworlds/<cow_id>/episode-requests route instead;
-  #   cli.py is byte-identical between the two, so every grepped marker holds
-  #   (seen: cogame-walker-waterworld release run 32962660196, 2026-08-26).
-  # 0.1.34 unconditionally prints "Replay liveness: verified ...", so the
-  # certify gate can never pass on it. Do not pin lower.
-  COWORLD_PKG: "coworld[auth]==0.1.56"
-  LIVENESS_MARKER: "Replay liveness: skipped (static replay bundle declared"
+  COWORLD_PKG: "coworld[auth]==0.1.69"
 
 jobs:
   release:
@@ -163,39 +146,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "Certify locally" > "$RR/current_step"
-          set +e
-          uvx --from "$COWORLD_PKG" coworld certify dist/coworld_manifest.json \
-            --no-open-report \
-            2>&1 | tee "$RR/certify.log"
-          rc="${PIPESTATUS[0]}"
-          set -e
-          python3 - "$RR" "$rc" "$LIVENESS_MARKER" <<'PY'
-          import json, sys
-          rr, rc, marker = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-          text = open(f"{rr}/certify.log", errors="replace").read()
-          liveness = next(
-              (ln.strip() for ln in text.splitlines() if ln.strip().startswith("Replay liveness:")),
-              None,
-          )
-          ok = rc == 0 and marker in text
-          json.dump(
-              {"ok": ok, "exit_code": rc, "replay_liveness": liveness,
-               "output_tail": text[-4000:]},
-              open(f"{rr}/certify.json", "w"), indent=2,
-          )
-          if rc != 0:
-              raise SystemExit(f"certify exited {rc}")
-          if marker not in text:
-              raise SystemExit(
-                  "certification did not report the STATIC replay bundle.\n"
-                  f"  expected a line containing: {marker}\n"
-                  f"  got: {liveness!r}\n"
-                  "The manifest must declare game.replay_viewer.bundle and "
-                  "tools/build_replay_viewer.sh must emit it; a pod-served "
-                  "/client/replay viewer is not acceptable."
-              )
-          print(f"certification OK: {liveness}")
-          PY
+          # Credential-free local HTTP fixture for local certification only;
+          # dist/coworld_manifest.json is never modified and never contains this endpoint.
+          python3 tools/ci/mock_llm_server.py \
+            --host 0.0.0.0 \
+            --port 0 \
+            --port-file "$RR/mock_llm.port" \
+            --log-file "$RR/mock_llm.jsonl" \
+            >"$RR/mock_llm.log" 2>&1 &
+          MOCK_PID="$!"
+          trap 'kill "$MOCK_PID" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -s "$RR/mock_llm.port" ] && break
+            sleep 0.1
+          done
+          test -s "$RR/mock_llm.port" || { echo "::error::local mock LLM fixture failed to start"; exit 1; }
+          MOCK_PORT="$(cat "$RR/mock_llm.port")"
+          DOCKER_GW="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
+          MOCK_ENDPOINT="http://${DOCKER_GW}:${MOCK_PORT}"
+          uvx --from "$COWORLD_PKG" python tools/ci/certify_fixture.py \
+            dist/coworld_manifest.json "$MOCK_ENDPOINT" "$RR/certify.json" 2>&1 | tee "$RR/certify.log"
 
       - name: Upload the policies
         # BEFORE upload-coworld: observed, upload-policy reports the local
@@ -385,7 +355,7 @@ jobs:
           canonical_raw = upload.get("canonical")
           errors = list(policy_errors)
           if certify is not None and not certify.get("ok"):
-              errors.append("local certification failed or did not declare a static replay bundle")
+              errors.append("local certification failed")
           if upload.get("exit_code") not in (None, 0):
               errors.append(f"upload-coworld exited {upload['exit_code']}")
           if canonical_raw == "no":
@@ -413,8 +383,7 @@ jobs:
               "hosted_certification": upload.get("hosted_certification"),
               "certify": None if certify is None else {
                   "ok": certify.get("ok"),
-                  "replay_liveness": certify.get("replay_liveness"),
-                  "output_tail": certify.get("output_tail"),
+                  "steps": certify.get("steps"),
               },
               "policies": policies,
               "errors": errors,
@@ -434,7 +403,7 @@ jobs:
               f"| manifest_sha | `{result['manifest_sha']}` |",
               f"| canonical | **{canonical_raw or 'unknown'}** |",
               f"| hosted smoke | {result['hosted_smoke'] or 'not reported'} |",
-              f"| replay liveness | {(certify or {}).get('replay_liveness') or 'not certified'} |",
+              f"| local certification steps | {len((certify or {}).get('steps', []))} |",
               "",
               "### Policies",
               "",

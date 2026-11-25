@@ -20,12 +20,17 @@ can cash in later, and so a spectator can watch it try.
 **Players act through seat observations and legal bid or challenge actions.**
 An external player sees its own hand, the public bid and talk history, prior
 revealed deals, standings, and its private notes. The game validates each
-submitted action and owns the rules, score, and replay. Existing prompt
-policies use the game’s Claude adapter; `bayes` and `pressure` remain
-explicit scripted baselines. This is a sequential turn game: only the acting
-seat decides. Offline certification runs on explicit scripted baselines; model
-or external policy failures terminate the episode as a policy failure without
-fabricating a substitute move or publishing participant scores.
+submitted action and owns the rules, score, and replay. The manifest publishes
+an ordinary selectable model policy (`liars-dice-model`, running
+`/bin/liars-dice-player` with `COWORLD_LLM_ENABLED=true` and
+`COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5` routed to the learner container)
+plus two explicit scripted baselines (`liars-dice-bayes` with
+`PLAYER_SCRIPTED=bayes` and `liars-dice-pressure` with
+`PLAYER_SCRIPTED=pressure`). This is a sequential turn game: only the acting
+seat decides. Certification seats both `liars-dice-model` and the explicit
+scripted baselines; model or external policy failures terminate the episode as a
+policy failure without fabricating a substitute move or publishing participant
+scores.
 
 Seats play under **anonymous cog names** (Sprocket, Gizmo, …) in a seeded
 random seating order: policy display names never reach a prompt, so nobody can
@@ -189,15 +194,17 @@ replaced them.
 
 ## Fielding a policy
 
-A prompt policy uses the published player runnable:
+A model policy reuses the published player runnable with the platform LLM
+sidecar enabled:
 
 ```bash
 uv run coworld upload-policy <liars-dice image> --name my-liars-dice \
   --run /bin/liars-dice-player \
+  --use-llm --llm-model anthropic/claude-haiku-4.5 \
   --secret-env PLAYER_PROMPT="Your Liar's Dice strategy here."
 ```
 
-Or field a scripted baseline: the same image with
+Or field an explicit scripted baseline: the same image with
 `--secret-env PLAYER_SCRIPTED=bayes` (or `pressure`). Any other value is
 rejected at startup.
 

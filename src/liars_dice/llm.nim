@@ -475,13 +475,39 @@ proc userPrompt*(sim: Sim, seat: int, prompt: string): string =
 
 # ---- Anthropic / Bedrock transport ------------------------------------------
 
-proc extractJsonObject*(text: string): JsonNode =
-  ## Parses a single strict JSON object reply matching the output contract.
+proc unwrapSingleMarkdownFence(text: string): string =
+  ## Accepts either bare text or a single outer Markdown presentation fence
+  ## (``` or ```json ... ```) with no surrounding prose and no nested fences.
   let trimmed = text.strip()
+  if not trimmed.startsWith("```"):
+    return trimmed
+  let firstNewline = trimmed.find('\n')
+  if firstNewline < 0:
+    return trimmed
+  let openingTag = trimmed[3 ..< firstNewline].strip()
+  for ch in openingTag:
+    if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
+      return trimmed
+  let rest = trimmed[firstNewline + 1 .. ^1]
+  if not rest.endsWith("```"):
+    return trimmed
+  let closingFenceStart = rest.len - 3
+  if closingFenceStart <= 0 or rest[closingFenceStart - 1] notin {'\n', '\r'}:
+    return trimmed
+  let inner = rest[0 ..< closingFenceStart].strip()
+  if "```" in inner:
+    return trimmed
+  inner
+
+proc extractJsonObject*(text: string): JsonNode =
+  ## Parses a single strict JSON object reply (optionally wrapped in a single
+  ## Markdown presentation fence) without inventing actions or fishing JSON out
+  ## of surrounding prose.
+  let trimmed = unwrapSingleMarkdownFence(text)
   if not (trimmed.startsWith("{") and trimmed.endsWith("}")):
     ## Quote the head of the reply so logs show WHAT the model sent
-    ## instead of JSON (prose, fences, a refusal, a cut-off analysis...).
-    let head = clipText(trimmed, 160)
+    ## instead of JSON (prose, multiple fences, a refusal, a cut-off analysis...).
+    let head = clipText(text.strip(), 160)
     raise newException(LiarsDiceError, "reply must be a single JSON object: " &
       head.replace("\n", " "))
   let parsed = parseJson(trimmed)
