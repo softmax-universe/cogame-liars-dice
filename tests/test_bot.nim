@@ -242,15 +242,15 @@ suite "the LLM path":
     check plainFencedBid.action == aBid
     check plainFencedBid.quantity == 2
     check plainFencedBid.face == 4
-    ## Prose-wrapped JSON, prose around a fence, and multiple fences are rejected.
-    expect LiarsDiceError:
-      discard extractJsonObject("Here is my move: {\"action\":\"challenge\"}")
-    expect LiarsDiceError:
-      discard extractJsonObject("Here is my move:\n```json\n{\"action\":\"challenge\"}\n```")
-    expect LiarsDiceError:
-      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```\nDone.")
-    expect LiarsDiceError:
-      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```\n```json\n{\"action\":\"bid\",\"quantity\":1,\"face\":1}\n```")
+    ## Descriptive text around one explicitly delimited answer is harmless.
+    for wrapped in ["Here is my move:\n```json\n{\"action\":\"challenge\"}\n```",
+                    "```json {\"action\":\"challenge\"}```\nDone."]:
+      check parseReply(sim, extractJsonObject(wrapped)).action == aChallenge
+    ## An unmarked object embedded in prose or two competing moves are ambiguous.
+    for ambiguous in ["Here is my move: {\"action\":\"challenge\"}",
+                      "```json\n{\"action\":\"challenge\"}\n```\n```json\n{\"action\":\"bid\",\"quantity\":1,\"face\":1}\n```"]:
+      expect LiarsDiceError:
+        discard extractJsonObject(ambiguous)
     ## Obsolete aliases and case-folded actions are rejected.
     for alias in ["BID", "Bid", "raise", "Challenge", "CALL", "call", "liar", "doubt", "ponder"]:
       expect LiarsDiceError:

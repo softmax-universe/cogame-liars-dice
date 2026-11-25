@@ -336,11 +336,7 @@ proc systemPrompt*(sim: Sim, seat: int): string =
       $MaxSayLen & " characters) to any\n  action. Everyone sees it. It is " &
       "cheap talk: nothing you say binds you, and\n  nothing anyone else " &
       "says binds them.\n")
-  result.add("""- Your notes are private to you and are fed back to you every turn.
-
-OUTPUT FORMAT: reply with ONLY one JSON object, nothing else - no analysis, no
-explanation, no markdown fences, no text before or after the object. Your reply
-must begin with the character { and end with }.""")
+  result.add("- You may include private notes for your next turn.\nReply with one JSON action.")
 
 proc tableLine(sim: Sim): string =
   ## Every seat in turn order for this deal, opener first.
@@ -447,62 +443,45 @@ proc userPrompt*(sim: Sim, seat: int, prompt: string): string =
   result.add("YOUR NOTES:\n" &
     (if sim.notes[seat].len > 0: sim.notes[seat] else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
-  let sayHint =
-    if sim.config.talk: ",\"say\":\"...\"" else: ""
-  let textLimits =
-    (if sim.config.talk: "; say at most " & $MaxSayLen & " characters" else: "") &
-    "; notes at most " & $MaxNotesLen & " characters."
-  if sim.bidSeat < 0:
-    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":1,\"face\":" &
-      $sim.config.lowFace() & sayHint & ",\"notes\":\"...\"} - " &
-      "you open this deal and must bid" & textLimits)
-  elif sim.bidQuantity < sim.totalSymbols():
-    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":" &
-      $(sim.bidQuantity + 1) & ",\"face\":" & $sim.config.lowFace() & sayHint &
-      ",\"notes\":\"...\"}\nor {\"action\":\"challenge\"" & sayHint &
-      ",\"notes\":\"...\"} - a bid must strictly raise\n" &
-      bidText(sim.bidQuantity, sim.bidFace) & textLimits)
-  elif sim.bidFace < sim.config.highFace():
-    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":" &
-      $sim.bidQuantity & ",\"face\":" & $(sim.bidFace + 1) & sayHint &
-      ",\"notes\":\"...\"}\nor {\"action\":\"challenge\"" & sayHint &
-      ",\"notes\":\"...\"} - a bid must strictly raise\n" &
-      bidText(sim.bidQuantity, sim.bidFace) & textLimits)
+  let challenge = """{"action":"challenge"}"""
+  if sim.bidSeat >= 0 and sim.bidQuantity == sim.totalSymbols() and
+      sim.bidFace == sim.config.highFace():
+    result.add("No higher bid is legal. Reply with " & challenge)
   else:
-    result.add("Reply with ONLY {\"action\":\"challenge\"" & sayHint &
-      ",\"notes\":\"...\"} - no higher bid is legal, so you must challenge" &
-      textLimits)
+    let quantity =
+      if sim.bidSeat < 0: 1
+      else: min(sim.bidQuantity + 1, sim.totalSymbols())
+    let face =
+      if sim.bidSeat >= 0 and quantity == sim.bidQuantity: sim.bidFace + 1
+      else: sim.config.lowFace()
+    let bid = %*{"action": "bid", "quantity": quantity, "face": face}
+    if sim.bidSeat < 0:
+      result.add("Open with a bid, for example " & $bid)
+    else:
+      result.add("Raise the bid, for example " & $bid & ", or reply with " & challenge)
+  if sim.config.talk:
+    result.add(". Optional: say (table talk), notes (private).")
+  else:
+    result.add(". Optional: notes (private).")
+
 
 # ---- Anthropic / Bedrock transport ------------------------------------------
 
 proc unwrapSingleMarkdownFence(text: string): string =
-  ## Accepts either bare text or a single outer Markdown presentation fence
-  ## (``` or ```json ... ```) with no surrounding prose and no nested fences.
+  ## A single fenced answer unambiguously identifies the action among commentary.
   let trimmed = text.strip()
-  if not trimmed.startsWith("```"):
+  if trimmed.startsWith("{"):
     return trimmed
-  let firstNewline = trimmed.find('\n')
-  if firstNewline < 0:
+  let parts = trimmed.split("```")
+  if parts.len != 3 or '{' in parts[0] or '{' in parts[2]:
     return trimmed
-  let openingTag = trimmed[3 ..< firstNewline].strip()
-  for ch in openingTag:
-    if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
-      return trimmed
-  let rest = trimmed[firstNewline + 1 .. ^1]
-  if not rest.endsWith("```"):
-    return trimmed
-  let closingFenceStart = rest.len - 3
-  if closingFenceStart <= 0 or rest[closingFenceStart - 1] notin {'\n', '\r'}:
-    return trimmed
-  let inner = rest[0 ..< closingFenceStart].strip()
-  if "```" in inner:
-    return trimmed
-  inner
+  let body = parts[1].strip()
+  if body.toLowerAscii().startsWith("json"):
+    return body[4 .. ^1].strip()
+  body
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## Parses a single strict JSON object reply (optionally wrapped in a single
-  ## Markdown presentation fence) without inventing actions or fishing JSON out
-  ## of surrounding prose.
+  ## Accept a standalone action object or one explicitly fenced action.
   let trimmed = unwrapSingleMarkdownFence(text)
   if not (trimmed.startsWith("{") and trimmed.endsWith("}")):
     ## Quote the head of the reply so logs show WHAT the model sent
