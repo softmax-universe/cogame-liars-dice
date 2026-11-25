@@ -399,9 +399,8 @@ proc recordFacing(sim: var Sim, seat: int, challenged: bool) =
       sim.forgoneEv[seat][other] += ev
 
 proc applyBid*(sim: var Sim, seat, quantity, face: int, say = "",
-    notes = "", scripted = false, fallback = false) =
-  ## The seat on turn raises. Raises LiarsDiceError on anything illegal; the
-  ## server catches it and substitutes the scripted baseline's move.
+    notes = "", scripted = false) =
+  ## The seat on turn raises. Raises LiarsDiceError on anything illegal.
   sim.requireTurn(seat)
   if sim.mustChallenge():
     raise newException(LiarsDiceError,
@@ -433,13 +432,12 @@ proc applyBid*(sim: var Sim, seat, quantity, face: int, say = "",
   event.quantity = quantity
   event.face = face
   event.scripted = scripted
-  event.fallback = fallback
   event.say = spoken
   event.notes = sim.notes[seat]
   sim.addEvent(event)
 
 proc applyChallenge*(sim: var Sim, seat: int, say = "", notes = "",
-    scripted = false, fallback = false, forced = false) =
+    scripted = false, forced = false) =
   ## The seat on turn calls the standing bid. Every hand is revealed and the
   ## deal ends: +1 to whoever was right, -1 to whoever was wrong.
   sim.requireTurn(seat)
@@ -488,7 +486,6 @@ proc applyChallenge*(sim: var Sim, seat: int, say = "", notes = "",
   event.bidderWins = bidderWins
   event.forced = forced
   event.scripted = scripted
-  event.fallback = fallback
   event.say = spoken
   event.notes = sim.notes[seat]
   sim.addEvent(event)
@@ -692,10 +689,10 @@ proc replayMatch*(config: GameConfig, events: seq[GameEvent]): seq[Sim] =
           "deal " & $event.deal & " does not match the seeded deal")
     of evBid:
       sim.applyBid(event.seat, event.quantity, event.face, event.say,
-        event.notes, event.scripted, event.fallback)
+        event.notes, event.scripted)
     of evChallenge:
       sim.applyChallenge(event.seat, event.say, event.notes, event.scripted,
-        event.fallback, event.forced)
+        event.forced)
     of evEnd:
       if not sim.done:
         sim.settle(event.text)
@@ -724,7 +721,6 @@ proc eventToJson*(event: GameEvent): JsonNode =
     result["quantity"] = %event.quantity
     result["face"] = %event.face
     result["scripted"] = %event.scripted
-    result["fallback"] = %event.fallback
   of evChallenge:
     result["seat"] = %event.seat
     result["other"] = %event.other
@@ -738,7 +734,6 @@ proc eventToJson*(event: GameEvent): JsonNode =
     result["bidderWins"] = %event.bidderWins
     result["forced"] = %event.forced
     result["scripted"] = %event.scripted
-    result["fallback"] = %event.fallback
   of evEnd:
     discard
   if event.say.len > 0:
@@ -766,7 +761,6 @@ proc eventFromJson*(node: JsonNode): GameEvent =
     bidderWins: node{"bidderWins"}.getBool(false),
     forced: node{"forced"}.getBool(false),
     scripted: node{"scripted"}.getBool(false),
-    fallback: node{"fallback"}.getBool(false),
     say: node{"say"}.getStr(""),
     notes: node{"notes"}.getStr(""),
     text: node{"text"}.getStr("")

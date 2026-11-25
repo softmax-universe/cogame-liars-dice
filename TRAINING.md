@@ -7,9 +7,10 @@ all retries, actual served model and platform call identifiers when
 Recording finishes before results trigger player teardown.
 
 Each accepted proposal is compared with the independently recorded engine event.
-The corpus retains every seat, consumed fallback, forced action, and complete
-participant outcome. Missing credentials, external timeouts, deadlines, and
-engine-forced actions are fallback evidence, never teacher labels.
+The corpus retains every seat, engine-forced bid-cap actions, rejected/missing
+policy failures (with failed episodes terminating without publishing participant
+scores), and complete participant outcomes for completed episodes. Engine-forced
+actions and failed attempts are never teacher labels.
 Public replay and live spectator events exclude private memory. Stored replay
 readers retain their existing format; archived files are not rewritten.
 

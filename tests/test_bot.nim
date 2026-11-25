@@ -5,7 +5,7 @@
 ## label means nothing. And the LLM reply parser must be tolerant of the
 ## shapes a model really emits without ever letting an illegal move through.
 
-import std/[json, monotimes, os, times, unicode, unittest]
+import std/[json, monotimes, os, strutils, times, unicode, unittest]
 import liars_dice/[llm, sim]
 
 ## Every test in this file is about the SCRIPTED path. Clear the credential
@@ -111,23 +111,19 @@ suite "scripted baselines":
     echo "baseline sweep: ", elapsed, " ms"
     check elapsed < 240_000
 
-  test "an unknown PLAYER_SCRIPTED name coerces to bayes":
-    check normalizeBaseline("pressure") == "pressure"
-    check normalizeBaseline("PRESSURE") == "pressure"
-    check normalizeBaseline("bayes") == "bayes"
-    check normalizeBaseline("1") == "bayes"
-    check normalizeBaseline("") == "bayes"
-    check normalizeBaseline("nonsense") == "bayes"
+  test "only explicit bayes and pressure scripted baselines are accepted":
+    check parseBaseline("pressure") == "pressure"
+    check parseBaseline("bayes") == "bayes"
+    for bad in ["PRESSURE", "1", "", "nonsense"]:
+      expect LiarsDiceError:
+        discard parseBaseline(bad)
     let config = fixture(seed = 5)
     let client = newLlmClient(config)
     var sim = initSim(config)
     sim.beginDeal()
     let seat = sim.currentTurn().seat
-    let coerced = client.scriptedAction(sim, seat, "nonsense")
-    let bayes = client.scriptedAction(sim, seat, "bayes")
-    check coerced.action == bayes.action
-    check coerced.quantity == bayes.quantity
-    check coerced.face == bayes.face
+    expect LiarsDiceError:
+      discard client.scriptedAction(sim, seat, "nonsense")
 
   test "calibration: two bayes seats beat two pressure seats":
     var bayesTotal = 0.0
@@ -197,11 +193,9 @@ suite "scripted baselines":
     check counted > 0
 
 suite "the LLM path":
-  test "decide falls back to scripted with no credentials and no retry":
+  test "decide fails without fabricating a move when no credentials exist":
     let config = fixture(seed = 3)
     let client = newLlmClient(config)
-    ## No credentials anywhere: the client latches disabled at construction,
-    ## so the very first attempt is the scripted move — no network, no retry.
     check client.disabled
     var sim = initSim(config)
     sim.beginDeal()
@@ -211,46 +205,58 @@ suite "the LLM path":
       scripted = false)
     let elapsed = (getMonoTime() - started).inMilliseconds
     check elapsed < 1000
-    check decision.scripted
-    check decision.fallback
-    ## And it is legal, so the episode always advances.
-    if decision.action == aBid:
-      check sim.legalBid(decision.quantity, decision.face)
-      sim.applyBid(seat, decision.quantity, decision.face)
-    else:
-      check sim.bidSeat >= 0
-      sim.applyChallenge(seat)
-    check sim.events[^1].kind in {evBid, evChallenge}
+    check decision.failed
+    check not decision.scripted
+    check decision.failureReason.len > 0
 
-  test "replies parse tolerantly and illegal ones are still rejected":
+  test "userPrompt only shows legal action forms":
+    let config = fixture(seed = 4)
+    var sim = initSim(config)
+    sim.beginDeal()
+    let opener = sim.currentTurn().seat
+    let openPrompt = sim.userPrompt(opener, "")
+    check "\"action\":\"bid\"" in openPrompt
+    check "\"action\":\"challenge\"" notin openPrompt
+    sim.applyBid(opener, sim.totalSymbols(), sim.config.highFace())
+    let next = sim.currentTurn().seat
+    let maxBidPrompt = sim.userPrompt(next, "")
+    check "\"action\":\"challenge\"" in maxBidPrompt
+    check "\"action\":\"bid\"" notin maxBidPrompt
+    check "\"quantity\":" & $(sim.totalSymbols() + 1) notin maxBidPrompt
+
+  test "replies parse strictly and reject aliases, fences, and non-integers":
     let config = fixture(seed = 8)
     var sim = initSim(config)
     sim.beginDeal()
     let seat = sim.currentTurn().seat
-    for word in ["bid", "BID", "Bid", " raise "]:
-      let reply = parseReply(sim, %*{"action": word, "quantity": 3,
-        "face": 2})
-      check reply.action == aBid
-      check reply.quantity == 3
-      check reply.face == 2
-    for word in ["challenge", "Challenge", "CALL", "liar", "doubt"]:
-      check parseReply(sim, %*{"action": word}).action == aChallenge
-    ## Numbers as numeric strings.
-    let stringy = parseReply(sim, %*{"action": "bid", "quantity": "4",
-      "face": " 6 "})
-    check stringy.quantity == 4
-    check stringy.face == 6
-    ## Missing or unknown action, and a bid with no numbers, are rejected.
+    let validBid = parseReply(sim, extractJsonObject("""{"action":"bid","quantity":3,"face":2}"""))
+    check validBid.action == aBid
+    check validBid.quantity == 3
+    check validBid.face == 2
+    let validChallenge = parseReply(sim, extractJsonObject("""{"action":"challenge"}"""))
+    check validChallenge.action == aChallenge
+    ## Fenced or prose-wrapped JSON is rejected.
+    expect LiarsDiceError:
+      discard extractJsonObject("```json\n{\"action\":\"challenge\"}\n```")
+    expect LiarsDiceError:
+      discard extractJsonObject("Here is my move: {\"action\":\"challenge\"}")
+    ## Obsolete aliases and case-folded actions are rejected.
+    for alias in ["BID", "Bid", "raise", "Challenge", "CALL", "call", "liar", "doubt", "ponder"]:
+      expect LiarsDiceError:
+        discard parseReply(sim, %*{"action": alias, "quantity": 3, "face": 2})
+    ## Numeric strings and floats are rejected; quantity and face must be JSON integers.
+    expect LiarsDiceError:
+      discard parseReply(sim, %*{"action": "bid", "quantity": "4", "face": 6})
+    expect LiarsDiceError:
+      discard parseReply(sim, %*{"action": "bid", "quantity": 4, "face": "6"})
+    expect LiarsDiceError:
+      discard parseReply(sim, %*{"action": "bid", "quantity": 4.5, "face": 6})
+    ## Missing action or missing bid fields are rejected.
     expect LiarsDiceError:
       discard parseReply(sim, %*{"quantity": 3, "face": 2})
     expect LiarsDiceError:
-      discard parseReply(sim, %*{"action": "ponder"})
-    expect LiarsDiceError:
       discard parseReply(sim, %*{"action": "bid", "face": 2})
-    expect LiarsDiceError:
-      discard parseReply(sim, %*{"action": "bid", "quantity": "many",
-        "face": 2})
-    ## Oversized free text is TRUNCATED on rune boundaries, not rejected.
+    ## Oversized free text is truncated on rune boundaries.
     var longSay = ""
     for index in 0 ..< 400:
       longSay.add("é")
@@ -263,8 +269,7 @@ suite "the LLM path":
     check padded.notes.runeLen == MaxNotesLen
     check validateUtf8(padded.say) == -1
     check validateUtf8(padded.notes) == -1
-    ## An opening bid stands, and then only a strict raise survives the probe
-    ## the decide() path applies before it accepts a reply.
+    ## An opening bid stands, and then only a strict raise survives the probe.
     sim.applyBid(seat, 5, 3)
     let next = sim.currentTurn().seat
     for bad in [(5, 3), (5, 2), (4, 6), (0, 3), (21, 3), (6, 9)]:
@@ -282,7 +287,7 @@ suite "the LLM path":
     var fresh = initSim(config)
     fresh.beginDeal()
     let opener = fresh.currentTurn().seat
-    let call = parseReply(fresh, %*{"action": "call"})
+    let call = parseReply(fresh, %*{"action": "challenge"})
     check call.action == aChallenge
     var freshProbe = fresh
     expect LiarsDiceError:

@@ -60,7 +60,6 @@ type
     bidderWins*: bool     ## challenge: the standing bid was true
     forced*: bool         ## challenge: forced by the bid cap
     scripted*: bool       ## the action came from a scripted baseline
-    fallback*: bool       ## the LLM reply was rejected twice
     say*: string          ## table talk carried by the action
     notes*: string        ## the actor's private notes after the reply
     text*: string         ## end: the reason
