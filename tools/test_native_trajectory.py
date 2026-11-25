@@ -20,7 +20,7 @@ binary, output, revision = sys.argv[1:]
 root = Path(output)
 root.mkdir(mode=0o700, parents=True, exist_ok=False)
 reports = []
-for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
+for mode in ["accepted", "retry", "invalid", "greedy", "refusal", "sampled"]:
     folder = root / mode
     folder.mkdir(mode=0o700)
     requests = []
@@ -42,7 +42,7 @@ for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
                 action.update(quantity=1, face=1)
             raw = json.dumps(action, separators=(",", ":"))
             if (
-                mode == "fallback"
+                mode == "invalid"
                 or mode == "retry"
                 and "previous reply was invalid" not in user
             ):
@@ -116,6 +116,7 @@ for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
         COGAME_RESULTS_URI=(folder / "results.json").as_uri(),
         COGAME_SAVE_REPLAY_URI=(folder / "replay.json").as_uri(),
         COGAME_SAVE_TRAJECTORY_URI=(folder / "trajectory.jsonl").as_uri(),
+        COGAME_PLAYER_FAILURE_URI=(folder / "player_failure.json").as_uri(),
         COWORLD_LLM_ENDPOINT=f"http://127.0.0.1:{server.server_port}",
         COWORLD_LLM_MODEL="fixture/native",
         COWORLD_LLM_TEMPERATURE="1" if mode == "sampled" else "0",
@@ -153,7 +154,11 @@ for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
                             {"type": "prompt", "prompt": "PRIVATE OPERATOR SENTINEL"}
                         )
                     )
-                assert process.wait(timeout=120) == 0, (folder / "game.log").read_text()
+                exit_code = process.wait(timeout=120)
+                if mode in {"invalid", "refusal"}:
+                    assert exit_code != 0, (folder / "game.log").read_text()
+                else:
+                    assert exit_code == 0, (folder / "game.log").read_text()
             finally:
                 for seat in sockets:
                     seat.close()
@@ -168,8 +173,23 @@ for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
         for line in (folder / "trajectory.jsonl").read_text().splitlines()
     ]
     decisions = events[:-1]
-    assert decisions and events[-1]["status"] == "completed"
-    assert events[-1]["outcome"]["reason"] == "complete"
+    if mode in {"invalid", "refusal"}:
+        assert len(decisions) == 1
+        assert decisions[0]["action_status"] == "rejected"
+        assert decisions[0]["selected_attempt_id"] is None
+        assert decisions[0]["executed_action"] is None
+        assert decisions[0]["terminal"] is True
+        assert len(decisions[0]["attempts"]) == 2
+        assert events[-1]["status"] == "failed"
+        assert events[-1]["outcome"]["reason"] == "player_failure"
+        assert events[-1]["participant_outcomes"] == {}
+        assert not (folder / "results.json").exists()
+        assert (folder / "player_failure.json").exists()
+    else:
+        assert decisions and events[-1]["status"] == "completed"
+        assert events[-1]["outcome"]["reason"] == "complete"
+        assert (folder / "results.json").exists()
+        assert not (folder / "player_failure.json").exists()
     calls = {record["platform_call_id"]: record for record in requests}
     for decision in decisions:
         for attempt in decision["attempts"]:
@@ -217,16 +237,19 @@ for mode in ["accepted", "retry", "fallback", "greedy", "refusal", "sampled"]:
         a["origin"] == "model" for d in decisions for a in d["attempts"]
     )
     for private_text in ["PRIVATE NOTE SENTINEL", "PRIVATE INVALID RESPONSE SENTINEL"]:
-        assert private_text not in (folder / "replay.json").read_text()
+        if (folder / "replay.json").exists():
+            assert private_text not in (folder / "replay.json").read_text()
         assert private_text not in (folder / "game.log").read_text()
-    assert "PRIVATE OPERATOR SENTINEL" not in (folder / "replay.json").read_text()
+    if (folder / "replay.json").exists():
+        assert "PRIVATE OPERATOR SENTINEL" not in (folder / "replay.json").read_text()
     assert "PRIVATE OPERATOR SENTINEL" not in (folder / "game.log").read_text()
     assert "PRIVATE OPERATOR SENTINEL" in (folder / "trajectory.jsonl").read_text()
     assert (folder / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
     reports.append(
         {
             "mode": mode,
-            "complete_episodes": 1,
+            "complete_episodes": 0 if mode in {"invalid", "refusal"} else 1,
+            "failed_episodes": 1 if mode in {"invalid", "refusal"} else 0,
             "decisions": len(decisions),
             "native_call_joins": len(requests),
             "source_revision": revision,

@@ -64,7 +64,7 @@ when isMainModule:
       let before = sim
       let seat = turn.seat
       if sim.mustChallenge():
-        let forced = Decision(action: aChallenge, scripted: true, fallback: true,
+        let forced = Decision(action: aChallenge, scripted: true,
           policy: "engine-bid-cap")
         sim.applyChallenge(seat, scripted = true, forced = true)
         trajectory.recordAppliedDecision(before, sim, seat, forced, OperatorPrompt,

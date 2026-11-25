@@ -40,7 +40,7 @@ for variant in variants:
                 {
                     "kind": "step",
                     "decision_id": observation["decision_id"],
-                    "response": "```json\n" + json.dumps(action) + "\n```",
+                    "response": json.dumps(action),
                 }
             )
             assert result["kind"] == "accepted" and result["action"] == action

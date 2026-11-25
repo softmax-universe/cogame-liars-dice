@@ -12,16 +12,19 @@
 ##   WS  /global                     - spectator snapshots
 ##   WS  /replay                     - replay payload (replay mode)
 ##
-## Player protocol (liarsdice.player.v1), all JSON text frames:
-##   game -> player: {"type":"welcome","slot":N,"name":...}
+## Player protocol (liarsdice.player.v2), all JSON text frames:
+##   game -> player: {"type":"welcome","protocol":"liarsdice.player.v2","slot":N,"name":...}
 ##                   {"type":"state",...} after every event (redacted to the
-##                   seat's own tallies: hands, bids and talk are not for the
-##                   container, and every decision is server-side)
-##                   {"type":"final","scores":[...],"points":[...]}
+##                   seat's own tallies)
+##                   {"type":"observation","event":E,"observation":{...}}
+##                   (external seats only, when on turn)
+##                   {"type":"final","done":true,...}
 ##   player -> game: {"type":"prompt","prompt":"...","scripted":bool,
 ##                    "baseline":"bayes|pressure"}
-##                   (max 4000 chars; scripted:true plays the named baseline
-##                   for that seat instead of the LLM)
+##                   (max 4000 chars; scripted:true requires baseline "bayes"
+##                   or "pressure")
+##                   {"type":"register","control":"external"}
+##                   {"type":"action","event":E,"action":{...}}
 
 import
   std/[json, options, locks, os, sets, strutils, tables, times, unicode],
@@ -53,6 +56,9 @@ type
     awaitingEvent: int
     pendingAction: Decision
     hasPendingAction: bool
+    pendingFailure: string
+    pendingSubmitted: string
+    hasPendingFailure: bool
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -299,6 +305,48 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   echo "liars-dice: episode complete, shutting down"
   quit(0)
 
+proc failEpisode(runtimeConfig: RuntimeConfig, before: Sim, seat: int,
+    decision: Decision, seatPrompt: string, missing: bool) =
+  ## Terminates an unplayed/invalid episode as an explicit policy failure.
+  ## Preserves failed attempt evidence and diagnostic artifacts without
+  ## fabricating a substitute move or publishing participant scores.
+  var failurePayload: string
+  withLock stateLock:
+    if state.finished:
+      return
+    state.finished = true
+    if state.trajectory.isSome:
+      state.trajectory.get().recordFailedDecision(before, seat, decision,
+        seatPrompt, missing = missing)
+      state.trajectory.get().finishFailedTrajectory(state.sim, seat,
+        decision.failureReason)
+      state.trajectory.get().writeEventsToUri(getEnv(CogameSaveTrajectoryUriEnv))
+    failurePayload = $ %*{
+      "slot": seat,
+      "name": state.config.players[seat].name,
+      "alias": state.sim.names[seat],
+      "reason": "player_failure",
+      "error": decision.failureReason
+    }
+    var final = %*{
+      "type": "final",
+      "done": true,
+      "reason": "player_failure",
+      "failedSeat": seat,
+      "error": decision.failureReason
+    }
+    for slot, socket in state.playerSockets:
+      final["slot"] = %slot
+      socket.send($final)
+  sleep(200)
+  let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI")
+  if failureUri.len > 0:
+    writeArtifact(failureUri, failurePayload, "application/json",
+      "COGAME_PLAYER_FAILURE_METHOD")
+  echo "liars-dice: episode failed due to player failure at seat ", seat,
+    " (no participant scores published)"
+  quit(1)
+
 const PlayBudgetFraction* = 0.6
   ## Share of the platform's episode timeout spent playing. The rest covers
   ## container start, player connects, and writing the artifacts — the part
@@ -407,7 +455,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           let seat = turn.seat
           let before = state.sim
           let forcedDecision = Decision(action: aChallenge, scripted: true,
-            fallback: true, policy: "engine-bid-cap")
+            policy: "engine-bid-cap")
           state.sim.applyChallenge(seat, scripted = true, forced = true)
           if state.trajectory.isSome:
             state.trajectory.get().recordAppliedDecision(before, state.sim, seat,
@@ -416,41 +464,43 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             " forced to challenge at the bid cap"
           state.broadcastLocked()
           continue
+        ## Past the call guard for a non-scripted seat, end cleanly at the
+        ## deadline instead of fabricating scripted moves on the seat's behalf.
+        if playDeadline > 0.0 and now + callGuard > playDeadline and
+            not state.scripted[turn.seat]:
+          echo "liars-dice: episode deadline reached mid-deal after ",
+            state.sim.dealsPlayed, "/", config.deals,
+            " deals; ending early"
+          state.sim.endEarly()
+          state.broadcastLocked()
+          break
         simCopy = state.sim
         seatPrompt = state.prompts[turn.seat]
         seatBaseline = state.baselines[turn.seat]
-        ## Past the guard every remaining decision is taken by the baseline
-        ## (instant) so the deal completes and the hands are revealed. The
-        ## note is explicit about WHICH baseline finishes a deal the play
-        ## clock interrupted: "remaining decisions of that deal are `bayes`
-        ## (instant) so the deal completes" (design.md:408) — the deal is
-        ## being finished for the clock's sake, not played, so it is finished
-        ## on the calibrated line rather than on whatever pressure the seat
-        ## registered.
-        let deadlineForced =
-          playDeadline > 0.0 and now + callGuard > playDeadline
-        if deadlineForced and not state.scripted[turn.seat]:
-          seatBaseline = "bayes"
-        seatScripted = state.scripted[turn.seat] or deadlineForced
-        seatExternal = state.external[turn.seat] and not deadlineForced and
+        seatScripted = state.scripted[turn.seat]
+        seatExternal = state.external[turn.seat] and
           state.playerSockets.hasKey(turn.seat)
         if seatExternal:
           state.awaitingSeat = turn.seat
           state.awaitingEvent = state.sim.events.len
           state.hasPendingAction = false
+          state.hasPendingFailure = false
+          state.pendingFailure = ""
+          state.pendingSubmitted = ""
           state.playerSockets[turn.seat].send($ %*{
             "type": "observation", "event": state.awaitingEvent,
             "observation": state.sim.decisionObservation(turn.seat, seatPrompt)})
 
-      ## The slow part (Claude) runs outside the lock on a snapshot; only
-      ## this thread mutates the sim, so the snapshot cannot go stale.
+      ## The slow part (Claude / external player) runs outside the lock on a
+      ## snapshot; only this thread mutates the sim, so the snapshot cannot go stale.
       var decision: Decision
+      var externalMissing = false
       if seatExternal:
         let actionDeadline = epochTime() + config.llmTimeoutSeconds.float
         while epochTime() < actionDeadline:
           var ready = false
           withLock stateLock:
-            ready = state.hasPendingAction
+            ready = state.hasPendingAction or state.hasPendingFailure
           if ready:
             break
           sleep(20)
@@ -458,16 +508,26 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           state.awaitingSeat = -1
           if state.hasPendingAction:
             decision = state.pendingAction
+          elif state.hasPendingFailure:
+            decision.failed = true
+            decision.failureReason = state.pendingFailure
+            decision.submittedResponse = state.pendingSubmitted
           else:
-            decision = client.scriptedAction(simCopy, turn.seat, "bayes")
-            decision.fallback = true
-            decision.policy = "scripted-bayes"
+            decision.failed = true
+            decision.failureReason = "external player action timeout"
+            externalMissing = true
       else:
         decision = client.decide(simCopy, turn.seat, seatPrompt,
           scripted = seatScripted, baseline = seatBaseline)
 
+      if decision.failed:
+        let missing = externalMissing or
+          (not seatExternal and decision.nativeAttempts.len == 0)
+        failEpisode(runtimeConfig, simCopy, turn.seat, decision, seatPrompt,
+          missing = missing)
+
       var challenged = false
-      var appliedFallback = ""
+      var rejectedError = ""
       withLock stateLock:
         echo "liars-dice: deal ", state.sim.deal + 1, " ",
           decisionText(state.sim, turn.seat, decision), " at ",
@@ -475,28 +535,23 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         try:
           if decision.action == aBid:
             state.sim.applyBid(turn.seat, decision.quantity, decision.face,
-              decision.say, decision.notes, decision.scripted,
-              decision.fallback)
+              decision.say, decision.notes, decision.scripted)
           else:
             state.sim.applyChallenge(turn.seat, decision.say, decision.notes,
-              decision.scripted, decision.fallback)
+              decision.scripted)
             challenged = true
         except LiarsDiceError as error:
-          echo "liars-dice: reply rejected; using the bayes fallback"
-          appliedFallback = "engine-rejection"
-          let fallback = client.scriptedAction(state.sim, turn.seat, "bayes")
-          if fallback.action == aBid:
-            state.sim.applyBid(turn.seat, fallback.quantity, fallback.face,
-              "", "", scripted = true, fallback = true)
-          else:
-            state.sim.applyChallenge(turn.seat, "", "", scripted = true,
-              fallback = true)
-            challenged = true
-        if state.trajectory.isSome:
-          if seatScripted and not state.scripted[turn.seat]: appliedFallback = "deadline"
-          state.trajectory.get().recordAppliedDecision(simCopy, state.sim,
-            turn.seat, decision, seatPrompt, state.scripted[turn.seat], appliedFallback)
-        state.broadcastLocked()
+          rejectedError = error.msg
+        if rejectedError.len == 0:
+          if state.trajectory.isSome:
+            state.trajectory.get().recordAppliedDecision(simCopy, state.sim,
+              turn.seat, decision, seatPrompt, state.scripted[turn.seat])
+          state.broadcastLocked()
+      if rejectedError.len > 0:
+        decision.failed = true
+        decision.failureReason = rejectedError
+        failEpisode(runtimeConfig, simCopy, turn.seat, decision, seatPrompt,
+          missing = false)
 
       ## Pace between deals: after the challenge that closes one.
       if config.turnDelayMs > 0 and challenged:
@@ -637,16 +692,22 @@ proc websocketHandler(
           withLock stateLock:
             if state.external[slot] and state.awaitingSeat == slot and
                 state.awaitingEvent == payload["event"].getInt():
-              var decision = parseReply(state.sim, payload["action"])
-              decision.submittedResponse = $payload["action"]
-              var probe = state.sim
-              if decision.action == aBid:
-                probe.applyBid(slot, decision.quantity, decision.face,
-                  decision.say, decision.notes)
-              else:
-                probe.applyChallenge(slot, decision.say, decision.notes)
-              state.pendingAction = decision
-              state.hasPendingAction = true
+              try:
+                var decision = parseReply(state.sim, payload["action"])
+                decision.submittedResponse = $payload["action"]
+                var probe = state.sim
+                if decision.action == aBid:
+                  probe.applyBid(slot, decision.quantity, decision.face,
+                    decision.say, decision.notes)
+                else:
+                  probe.applyChallenge(slot, decision.say, decision.notes)
+                state.pendingAction = decision
+                state.hasPendingAction = true
+              except CatchableError as error:
+                state.pendingFailure = error.msg
+                state.pendingSubmitted =
+                  if payload.hasKey("action"): $payload["action"] else: ""
+                state.hasPendingFailure = true
           return
         if payload{"type"}.getStr() == "prompt":
           var prompt = payload{"prompt"}.getStr()
@@ -655,11 +716,9 @@ proc websocketHandler(
             ## would ride into the model call and the log.
             prompt = prompt.runeSubStr(0, MaxPromptLen)
           let scripted = payload{"scripted"}.getBool(false)
-          let asked = payload{"baseline"}.getStr("bayes")
-          let baseline = normalizeBaseline(asked)
-          if asked.len > 0 and asked != baseline:
-            echo "liars-dice: slot ", slot, " asked for baseline '", asked,
-              "'; coerced to '", baseline, "'"
+          let baseline =
+            if scripted: parseBaseline(payload{"baseline"}.getStr())
+            else: ""
           withLock stateLock:
             state.prompts[slot] = prompt
             state.scripted[slot] = scripted

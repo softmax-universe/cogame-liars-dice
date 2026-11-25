@@ -452,7 +452,7 @@ suite "event json":
     var sim = initSim(fixtureConfig(deals = 2, seed = 15))
     sim.beginDeal()
     sim.applyBid(sim.currentTurn().seat, 3, 2, "sixes are cheap 🎲",
-      "watch the 字 seat", scripted = true, fallback = true)
+      "watch the 字 seat", scripted = true)
     sim.applyChallenge(sim.currentTurn().seat, "liar 🃏", "called it")
     sim.playDeal()
     check sim.done
@@ -471,7 +471,7 @@ suite "event json":
     check bid["quantity"].getInt() == 3
     check bid["face"].getInt() == 2
     check bid["scripted"].getBool()
-    check bid["fallback"].getBool()
+    check not bid.hasKey("fallback")
     check not bid.hasKey("counts")
     let challenge = sim.events[3].eventToJson()
     check challenge["kind"].getStr() == "challenge"

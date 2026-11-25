@@ -7,7 +7,7 @@
 ##
 ## PLAYER_SCRIPTED=bayes|pressure registers the seat as one of the built-in
 ## scripted baselines instead: the server plays it deterministically, no LLM.
-## Any other value (including the legacy `1`) means `bayes`.
+## Any other value is rejected at startup.
 ##
 ## To field your own policy, reuse this image and set PLAYER_PROMPT:
 ##   coworld upload-policy <liars-dice-image> --name my-liars-dice \
@@ -39,20 +39,20 @@ when isMainModule:
     prompt = DefaultPrompt
   let requested = getEnv("PLAYER_SCRIPTED").strip()
   let scripted = requested.len > 0
-  ## The server owns the coercion (and logs it); the player reports what it
-  ## was asked for.
-  let baseline = if requested.toLowerAscii() == "pressure": "pressure"
-    else: "bayes"
+  let baseline =
+    if not scripted: ""
+    elif requested == "bayes" or requested == "pressure": requested
+    else: quit("PLAYER_SCRIPTED must be 'bayes' or 'pressure', got: " & requested, 1)
 
   proc promptFrame(): string =
-    $ %*{"type": "prompt", "prompt": prompt,
-      "scripted": scripted, "baseline": baseline}
+    if scripted:
+      $ %*{"type": "prompt", "prompt": prompt,
+        "scripted": true, "baseline": baseline}
+    else:
+      $ %*{"type": "prompt", "prompt": prompt, "scripted": false}
 
   echo "liars-dice player: connecting to game"
   let socket = newWebSocket(url)
-  socket.send(promptFrame())
-  echo "liars-dice player: prompt delivered (", prompt.len, " chars",
-    (if scripted: ", scripted " & baseline else: ""), ")"
 
   ## whisky RAISES on a close frame or a truncated read (only a timeout
   ## returns none), and the game's quit(0) can outrun the flushed final
@@ -72,11 +72,14 @@ when isMainModule:
         of "welcome":
           echo "liars-dice player: seated at slot ",
             payload{"slot"}.getInt(), " as ", payload{"name"}.getStr()
-          ## Re-deliver the prompt after the welcome, in case the first send
-          ## raced the server's slot registration.
           socket.send(promptFrame())
+          echo "liars-dice player: prompt delivered (", prompt.len, " chars",
+            (if scripted: ", scripted " & baseline else: ""), ")"
         of "final":
-          echo "liars-dice player: final scores ", payload{"scores"}
+          if payload.hasKey("scores"):
+            echo "liars-dice player: final scores ", payload{"scores"}
+          else:
+            echo "liars-dice player: ended (", payload{"reason"}.getStr(), ")"
           break
         else:
           discard

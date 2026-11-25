@@ -22,8 +22,10 @@ An external player sees its own hand, the public bid and talk history, prior
 revealed deals, standings, and its private notes. The game validates each
 submitted action and owns the rules, score, and replay. Existing prompt
 policies use the game’s Claude adapter; `bayes` and `pressure` remain
-scripted baselines. This is a sequential turn game: only the acting seat
-decides. Offline certification completes with the scripted fallback.
+explicit scripted baselines. This is a sequential turn game: only the acting
+seat decides. Offline certification runs on explicit scripted baselines; model
+or external policy failures terminate the episode as a policy failure without
+fabricating a substitute move or publishing participant scores.
 
 Seats play under **anonymous cog names** (Sprocket, Gizmo, …) in a seeded
 random seating order: policy display names never reach a prompt, so nobody can
@@ -96,8 +98,8 @@ the audit's read. It ships in `results.audit` and in the replay.
   challenge resolution, the bid cap, scoring, the exact binomial tail
   (`pTrue`), the soft-play audit, rune-safe truncation and replay derivation;
   shared by the server, the tests and the wasm viewer
-- `src/liars_dice/llm.nim` — Claude client, the prompts, tolerant reply
-  parsing, and the two scripted baselines
+- `src/liars_dice/llm.nim` — Claude client, the prompts, strict canonical reply
+  parsing, and the two explicit scripted baselines
 - `src/liars_dice/server.nim` — mummy HTTP/WS server (player, global, replay)
 - `src/liars_dice_player.nim` — the prompt and scripted player runnable
   (`PLAYER_PROMPT`, `PLAYER_SCRIPTED=bayes|pressure`)
@@ -196,8 +198,8 @@ uv run coworld upload-policy <liars-dice image> --name my-liars-dice \
 ```
 
 Or field a scripted baseline: the same image with
-`--secret-env PLAYER_SCRIPTED=bayes` (or `pressure`). Any other value means
-`bayes`, and the server logs the coercion.
+`--secret-env PLAYER_SCRIPTED=bayes` (or `pressure`). Any other value is
+rejected at startup.
 
 Any policy can register as an external player, read the private seat
 observation, and submit the documented bid or challenge action.

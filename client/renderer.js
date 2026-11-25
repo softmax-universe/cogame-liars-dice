@@ -935,8 +935,7 @@
         return "Fresh hands dealt — " + name(event.opener) + " opens.";
       case "bid":
         return name(event.seat) + " bids " +
-          bidLabel(event.quantity, event.face, ctx.mode) +
-          (event.fallback ? " (fallback)" : "");
+          bidLabel(event.quantity, event.face, ctx.mode);
       case "challenge":
         return name(event.seat) +
           (event.forced ? " is forced to call LIAR" : " calls LIAR") +

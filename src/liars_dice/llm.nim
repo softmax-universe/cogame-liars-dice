@@ -9,11 +9,9 @@
 ##   Bedrock bearer token            - local play
 ##   ANTHROPIC_API_KEY                - the key itself
 ##   ANTHROPIC_API_KEY_URI            - a URI holding the key
-## With no credentials every decision falls back to the always-legal scripted
-## baseline immediately (no retries, no network waits) so offline
-## certification still completes - this fallback is load-bearing. The same
-## scripted bot is also a fieldable policy: a player that registers as
-## scripted plays it deliberately, LLM or not.
+## Scripted seats explicitly select `bayes` or `pressure` and never call an LLM.
+## Non-scripted seats require a valid legal model reply; failures never
+## fabricate a substitute move.
 
 import
   std/[json, options, times, math, os, random, strutils, unicode],
@@ -60,8 +58,9 @@ type
     face*: int
     say*: string
     notes*: string
-    scripted*: bool   ## produced by a scripted baseline
-    fallback*: bool   ## the LLM reply was rejected twice
+    scripted*: bool   ## produced by an explicitly registered scripted baseline
+    failed*: bool     ## model failed to produce a valid legal action
+    failureReason*: string
 
   Thresholds* = tuple[chal, safe: float, pad: bool]
     ## One scripted baseline's parameters: challenge a standing bid below
@@ -176,7 +175,7 @@ proc newLlmClient*(config: GameConfig): LlmClient =
   else:
     result.transport = ltNone
     result.disabled = true
-    echo "liars-dice llm: no LLM credentials; using scripted fallback"
+    echo "liars-dice llm: no LLM credentials configured"
 
 proc newScriptedClient*(config: GameConfig): LlmClient =
   ## Offline training uses the published baseline without transport or logging.
@@ -184,13 +183,17 @@ proc newScriptedClient*(config: GameConfig): LlmClient =
 
 # ---- Scripted baselines -----------------------------------------------------
 
-proc normalizeBaseline*(name: string): string =
-  ## `PLAYER_SCRIPTED` set to anything but `pressure` (including the legacy
-  ## `1`) means `bayes`; the caller logs the coercion.
-  if name.strip().toLowerAscii() == "pressure": "pressure" else: "bayes"
+proc parseBaseline*(name: string): string =
+  ## Scripted seats must explicitly choose `bayes` or `pressure`.
+  case name.strip()
+  of "bayes": "bayes"
+  of "pressure": "pressure"
+  else:
+    raise newException(LiarsDiceError,
+      "unknown scripted baseline (expected bayes or pressure): " & name)
 
 proc baselineThresholds*(name: string): Thresholds =
-  if normalizeBaseline(name) == "pressure":
+  if parseBaseline(name) == "pressure":
     (PressureChallenge, PressureSafe, true)
   else:
     (BayesChallenge, BayesSafe, false)
@@ -446,30 +449,45 @@ proc userPrompt*(sim: Sim, seat: int, prompt: string): string =
   result.add(operatorBlock(prompt))
   let sayHint =
     if sim.config.talk: ",\"say\":\"...\"" else: ""
-  result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":" &
-    $(sim.bidQuantity + 1) & ",\"face\":" & $sim.config.lowFace() & sayHint &
-    ",\"notes\":\"...\"}\nor {\"action\":\"challenge\"" & sayHint &
-    ",\"notes\":\"...\"} - " &
-    (if sim.bidSeat >= 0:
-       "a bid must strictly raise\n" & bidText(sim.bidQuantity, sim.bidFace)
-     else:
-       "you open this deal, so a challenge is illegal") &
+  let textLimits =
     (if sim.config.talk: "; say at most " & $MaxSayLen & " characters" else: "") &
-    "; notes at most " & $MaxNotesLen & " characters.")
+    "; notes at most " & $MaxNotesLen & " characters."
+  if sim.bidSeat < 0:
+    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":1,\"face\":" &
+      $sim.config.lowFace() & sayHint & ",\"notes\":\"...\"} - " &
+      "you open this deal and must bid" & textLimits)
+  elif sim.bidQuantity < sim.totalSymbols():
+    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":" &
+      $(sim.bidQuantity + 1) & ",\"face\":" & $sim.config.lowFace() & sayHint &
+      ",\"notes\":\"...\"}\nor {\"action\":\"challenge\"" & sayHint &
+      ",\"notes\":\"...\"} - a bid must strictly raise\n" &
+      bidText(sim.bidQuantity, sim.bidFace) & textLimits)
+  elif sim.bidFace < sim.config.highFace():
+    result.add("Reply with ONLY {\"action\":\"bid\",\"quantity\":" &
+      $sim.bidQuantity & ",\"face\":" & $(sim.bidFace + 1) & sayHint &
+      ",\"notes\":\"...\"}\nor {\"action\":\"challenge\"" & sayHint &
+      ",\"notes\":\"...\"} - a bid must strictly raise\n" &
+      bidText(sim.bidQuantity, sim.bidFace) & textLimits)
+  else:
+    result.add("Reply with ONLY {\"action\":\"challenge\"" & sayHint &
+      ",\"notes\":\"...\"} - no higher bid is legal, so you must challenge" &
+      textLimits)
 
 # ---- Anthropic / Bedrock transport ------------------------------------------
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## Pulls the first {...} object out of a model response, tolerating fences.
-  let start = text.find('{')
-  let stop = text.rfind('}')
-  if start < 0 or stop <= start:
-    ## Quote the head of the reply so a hosted log shows WHAT the model sent
-    ## instead of JSON (prose, a refusal, a cut-off analysis...).
-    let head = clipText(text.strip(), 160)
-    raise newException(LiarsDiceError, "no JSON object in response: " &
+  ## Parses a single strict JSON object reply matching the output contract.
+  let trimmed = text.strip()
+  if not (trimmed.startsWith("{") and trimmed.endsWith("}")):
+    ## Quote the head of the reply so logs show WHAT the model sent
+    ## instead of JSON (prose, fences, a refusal, a cut-off analysis...).
+    let head = clipText(trimmed, 160)
+    raise newException(LiarsDiceError, "reply must be a single JSON object: " &
       head.replace("\n", " "))
-  parseJson(text[start .. stop])
+  let parsed = parseJson(trimmed)
+  if parsed.kind != JObject:
+    raise newException(LiarsDiceError, "reply must be a JSON object")
+  parsed
 
 proc decisionAction*(sim: Sim, decision: Decision): JsonNode =
   result = %*{"notes": (if decision.notes.len > 0: cleanNotes(decision.notes) else: sim.notes[sim.actingSeat()])}
@@ -579,36 +597,27 @@ proc parseAction(payload: JsonNode): Action =
   let node = payload{"action"}
   if node.isNil or node.kind != JString:
     raise newException(LiarsDiceError, "no action in the reply")
-  let text = node.getStr().strip().toLowerAscii()
+  let text = node.getStr()
   case text
-  of "bid", "raise":
+  of "bid":
     result = aBid
-  of "challenge", "call", "liar", "doubt":
+  of "challenge":
     result = aChallenge
   else:
-    raise newException(LiarsDiceError, "unknown action: " & text)
+    raise newException(LiarsDiceError,
+      "action must be \"bid\" or \"challenge\", got: " & text)
 
 proc parseNumber(payload: JsonNode, key: string): int =
   let node = payload{key}
   if node.isNil:
     raise newException(LiarsDiceError, "a bid needs a " & key)
-  case node.kind
-  of JInt:
-    result = node.getInt()
-  of JFloat:
-    result = int(node.getFloat())
-  of JString:
-    try:
-      result = parseInt(node.getStr().strip())
-    except ValueError:
-      raise newException(LiarsDiceError,
-        key & " must be a number: " & node.getStr())
-  else:
-    raise newException(LiarsDiceError, key & " must be a number")
+  if node.kind != JInt:
+    raise newException(LiarsDiceError, key & " must be an integer")
+  node.getInt()
 
 proc parseReply*(sim: Sim, payload: JsonNode): Decision =
-  ## Tolerant: action synonyms, numbers as ints or numeric strings, and
-  ## oversized free text truncated on rune boundaries rather than rejected.
+  ## Strict canonical JSON action parsing; oversized free text is truncated
+  ## on rune boundaries to stay within talk/notes limits.
   result.action = parseAction(payload)
   result.say = cleanSay(payload{"say"}.getStr())
   result.notes = cleanNotes(payload{"notes"}.getStr())
@@ -622,13 +631,19 @@ proc parseReply*(sim: Sim, payload: JsonNode): Decision =
 
 proc decide*(client: LlmClient, sim: Sim, seat: int, prompt: string,
     scripted: bool, baseline = "bayes"): Decision =
-  ## One decision for one seat — this is a strictly sequential turn game, so
-  ## exactly one call goes out per turn. Never raises: any failure falls back
-  ## to the scripted baseline so the episode always advances.
-  if scripted or client.disabled:
-    result = client.scriptedAction(sim, seat, baseline)
-    result.policy = "scripted-" & baseline
-    result.fallback = not scripted
+  ## One decision for one seat — this is a strictly sequential turn game.
+  ## Explicit scripted seats run their chosen baseline. Model seats never fall
+  ## back to a fabricated move: on missing credentials or after retry failure,
+  ## returns a failed Decision with all attempts preserved as evidence.
+  if scripted:
+    let resolved = parseBaseline(baseline)
+    result = client.scriptedAction(sim, seat, resolved)
+    result.policy = "scripted-" & resolved
+    return
+  if client.disabled:
+    result.failed = true
+    result.failureReason = "no LLM credentials configured"
+    result.policy = client.model
     return
   let system = systemPrompt(sim, seat)
   var reason = ""
@@ -672,9 +687,7 @@ proc decide*(client: LlmClient, sim: Sim, seat: int, prompt: string,
       echo "liars-dice llm: seat ", seat, " attempt ", attempt, " rejected"
       if client.disabled:
         break
-  echo "liars-dice llm: seat ", seat, " falling back to the bayes baseline"
-  let attempts = result.nativeAttempts
-  result = client.scriptedAction(sim, seat, "bayes")
-  result.policy = "scripted-bayes"
-  result.fallback = true
-  result.nativeAttempts = attempts
+  echo "liars-dice llm: seat ", seat, " failed without a valid move"
+  result.failed = true
+  result.failureReason = reason
+  result.policy = client.model
