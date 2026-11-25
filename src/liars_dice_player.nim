@@ -161,7 +161,11 @@ proc callModelOnce(curl: Curly, transport: ModelTransport, slot: int,
   if choice{"finish_reason"}.getStr() == "content_filter":
     raise newException(ValueError, "model refusal (content_filter)")
   let text = extractMessageText(choice)
-  result.action = extractJsonObject(text)
+  try:
+    result.action = extractJsonObject(text)
+  except CatchableError as error:
+    raise newException(ValueError, "invalid model action (finish_reason=" &
+      choice{"finish_reason"}.getStr("unknown") & "): " & error.msg)
 
 when isMainModule:
   let url = getEnv("COWORLD_PLAYER_WS_URL")

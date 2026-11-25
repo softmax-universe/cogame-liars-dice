@@ -69,7 +69,7 @@ def make_handler(reply_mode: str, log_path: Path | None):
                     }
                 encoded = json.dumps(action, separators=(",", ":"))
                 if reply_mode == "fenced":
-                    content = f"```json\n{encoded}\n```"
+                    content = f"Here is my move:\n```json\n{encoded}\n```\nDone."
                 else:
                     content = encoded
 

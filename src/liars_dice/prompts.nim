@@ -32,9 +32,7 @@ proc renderVariantPrompt*(sim: Sim, seat: int): string =
     else: ""
   result = Templates[ord(sim.config.selectedPromptVariant) - 1] %
     [sim.names[seat], $(sim.seats() - 1), deal, bid, talk]
-  result.add("\nOUTPUT FORMAT: reply with ONLY one JSON object, nothing else - no analysis, no\n" &
-    "explanation, no markdown fences, no text before or after the object. Your reply\n" &
-    "must begin with the character { and end with }.")
+  result.add("\nReply with one JSON action.")
 
 proc promptMetadata*(config: GameConfig, system, user: string): JsonNode =
   %*{"bank": PromptBankVersion, "variant": $config.selectedPromptVariant,
