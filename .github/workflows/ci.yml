@@ -167,11 +167,13 @@ jobs:
   # Packaging smoke: the production image builds, and one real episode runs
   # end to end in raw docker with the certification fixture's seat mix.
   # ---------------------------------------------------------------------
-      - name: Verify native private decisions and both training modes
+      - name: Verify native private decisions, model player, and both training modes
         run: |
           python3 -m pip install websockets==16.1.1
           nim c --hints:off -d:release --threads:on --path:src -o:/tmp/liars-dice-game src/liars_dice.nim
+          nim c --hints:off -d:release --path:src -o:/tmp/liars-dice-player src/liars_dice_player.nim
           python3 tools/test_native_trajectory.py /tmp/liars-dice-game /tmp/liars-dice-native-proof "$(git rev-parse HEAD)"
+          python3 tools/test_model_player.py /tmp/liars-dice-game /tmp/liars-dice-player "$(git rev-parse HEAD)"
           nim c --hints:off -d:release --path:src -o:/tmp/liars-dice-bridge tools/train_bridge.nim
           python3 tools/test_train_bridge.py /tmp/liars-dice-bridge
           python3 tools/test_language_bridge.py /tmp/liars-dice-bridge

@@ -684,17 +684,50 @@ proc websocketHandler(
         if payload{"type"}.getStr() == "register":
           if payload["control"].getStr() != "external":
             raise newException(LiarsDiceError, "unknown player control")
+          let hasPrompt = payload.hasKey("prompt")
+          var prompt = if hasPrompt: payload{"prompt"}.getStr() else: ""
+          if prompt.runeLen > MaxPromptLen:
+            prompt = prompt.runeSubStr(0, MaxPromptLen)
           withLock stateLock:
             state.external[slot] = true
             state.registered[slot] = true
+            if hasPrompt:
+              state.prompts[slot] = prompt
+          return
+        if payload{"type"}.getStr() == "action_error":
+          withLock stateLock:
+            if state.external[slot] and state.awaitingSeat == slot and
+                state.awaitingEvent == payload{"event"}.getInt(-1):
+              state.pendingFailure = payload{"error"}.getStr("external player error")
+              state.pendingSubmitted =
+                if payload.hasKey("raw_response"):
+                  (if payload["raw_response"].kind == JString:
+                     payload["raw_response"].getStr()
+                   else:
+                     $payload["raw_response"])
+                else:
+                  ""
+              state.hasPendingFailure = true
           return
         if payload{"type"}.getStr() == "action":
           withLock stateLock:
             if state.external[slot] and state.awaitingSeat == slot and
                 state.awaitingEvent == payload["event"].getInt():
+              let rawSubmitted =
+                if payload.hasKey("raw_response"):
+                  (if payload["raw_response"].kind == JString:
+                     payload["raw_response"].getStr()
+                   else:
+                     $payload["raw_response"])
+                elif payload.hasKey("action"):
+                  $payload["action"]
+                else:
+                  ""
               try:
                 var decision = parseReply(state.sim, payload["action"])
-                decision.submittedResponse = $payload["action"]
+                decision.submittedResponse = rawSubmitted
+                if payload.hasKey("model") and payload["model"].kind == JString:
+                  decision.policy = payload["model"].getStr()
                 var probe = state.sim
                 if decision.action == aBid:
                   probe.applyBid(slot, decision.quantity, decision.face,
@@ -705,8 +738,7 @@ proc websocketHandler(
                 state.hasPendingAction = true
               except CatchableError as error:
                 state.pendingFailure = error.msg
-                state.pendingSubmitted =
-                  if payload.hasKey("action"): $payload["action"] else: ""
+                state.pendingSubmitted = rawSubmitted
                 state.hasPendingFailure = true
           return
         if payload{"type"}.getStr() == "prompt":

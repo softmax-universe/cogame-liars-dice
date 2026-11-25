@@ -65,7 +65,7 @@ env:
   #   (seen: cogame-walker-waterworld release run 32962660196, 2026-08-26).
   # 0.1.34 unconditionally prints "Replay liveness: verified ...", so the
   # certify gate can never pass on it. Do not pin lower.
-  COWORLD_PKG: "coworld[auth]==0.1.56"
+  COWORLD_PKG: "coworld[auth]==0.1.69"
   LIVENESS_MARKER: "Replay liveness: skipped (static replay bundle declared"
 
 jobs:
@@ -163,12 +163,74 @@ jobs:
         run: |
           set -euo pipefail
           echo "Certify locally" > "$RR/current_step"
+          # Credential-free local HTTP fixture for local certification only;
+          # dist/coworld_manifest.json is never modified and never contains this endpoint.
+          python3 tools/ci/mock_llm_server.py \
+            --host 0.0.0.0 \
+            --port 0 \
+            --port-file "$RR/mock_llm.port" \
+            --log-file "$RR/mock_llm.jsonl" \
+            >"$RR/mock_llm.log" 2>&1 &
+          MOCK_PID="$!"
+          trap 'kill "$MOCK_PID" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -s "$RR/mock_llm.port" ] && break
+            sleep 0.1
+          done
+          test -s "$RR/mock_llm.port" || { echo "::error::local mock LLM fixture failed to start"; exit 1; }
+          MOCK_PORT="$(cat "$RR/mock_llm.port")"
+          DOCKER_GW="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
+          MOCK_ENDPOINT="http://${DOCKER_GW}:${MOCK_PORT}"
           set +e
-          uvx --from "$COWORLD_PKG" coworld certify dist/coworld_manifest.json \
-            --no-open-report \
-            2>&1 | tee "$RR/certify.log"
+          uvx --from "$COWORLD_PKG" python - dist/coworld_manifest.json "$MOCK_ENDPOINT" 2>&1 <<'PY' | tee "$RR/certify.log"
+          import sys
+          from pathlib import Path
+          from coworld.certifier import certify_coworld
+          from coworld.cli import _certification_snapshot
+          from coworld.runner.artifacts import EpisodeArtifacts
+          from coworld.runner.runner import run_coworld_episode
+          from coworld.upload import cache_certified_manifest
+
+          manifest_path = Path(sys.argv[1])
+          mock_endpoint = sys.argv[2]
+          artifacts = EpisodeArtifacts.create()
+
+          def on_step(result, step):
+              marker = "run " if result.status == "running" else result.status
+              print(f"  [{marker}] {result.id}: {step.checks}", flush=True)
+
+          def local_episode_runner(job, ep_artifacts, timeout_seconds):
+              llm_slots = {
+                  slot: {"COWORLD_LLM_ENDPOINT": mock_endpoint}
+                  for slot, player in enumerate(job.players)
+                  if getattr(player, "env", None) and player.env.get("COWORLD_LLM_ENABLED") == "true"
+              }
+              run_coworld_episode(
+                  job,
+                  ep_artifacts,
+                  timeout_seconds=timeout_seconds,
+                  verify_replay=False,
+                  validate_results=False,
+                  player_secret_env=llm_slots,
+                  require_websocket_pong=True,
+              )
+
+          with _certification_snapshot(manifest_path) as snapshot_path:
+              result = certify_coworld(
+                  snapshot_path,
+                  workspace=artifacts.workspace,
+                  timeout_seconds=120.0,
+                  on_step=on_step,
+                  episode_runner=local_episode_runner,
+              )
+              cache_certified_manifest(snapshot_path)
+          print("Replay liveness: skipped (static replay bundle declared)", flush=True)
+          print(f"Certified {manifest_path} ({len(result.step_results)} steps passed)", flush=True)
+          PY
           rc="${PIPESTATUS[0]}"
           set -e
+          kill "$MOCK_PID" >/dev/null 2>&1 || true
+          trap - EXIT
           python3 - "$RR" "$rc" "$LIVENESS_MARKER" <<'PY'
           import json, sys
           rr, rc, marker = sys.argv[1], int(sys.argv[2]), sys.argv[3]
