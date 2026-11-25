@@ -416,26 +416,6 @@
   },
   "player": [
     {
-      "id": "liars-dice-player",
-      "name": "Liar's Dice Prompt Player",
-      "type": "player",
-      "description": "The reference Liar's Dice policy: delivers its PLAYER_PROMPT (or a default counting-and-bluffing strategy) to the game and spectates until the final frame. Field your own policy by uploading this same image with a different PLAYER_PROMPT.",
-      "image": "{{LIARS_DICE_IMAGE}}",
-      "run": [
-        "/bin/liars-dice-player"
-      ],
-      "resources": {
-        "requests": {
-          "cpu": "100m",
-          "memory": "64Mi"
-        },
-        "limits": {
-          "cpu": "1"
-        }
-      },
-      "source_url": "https://github.com/softmax-universe/cogame-liars-dice/tree/main"
-    },
-    {
       "id": "liars-dice-bayes",
       "name": "Liar's Dice Bayes Baseline",
       "type": "player",
