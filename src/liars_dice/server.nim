@@ -322,11 +322,8 @@ proc failEpisode(runtimeConfig: RuntimeConfig, before: Sim, seat: int,
         decision.failureReason)
       state.trajectory.get().writeEventsToUri(getEnv(CogameSaveTrajectoryUriEnv))
     failurePayload = $ %*{
-      "slot": seat,
-      "name": state.config.players[seat].name,
-      "alias": state.sim.names[seat],
-      "reason": "player_failure",
-      "error": decision.failureReason
+      "failed_policy_index": seat,
+      "message": ("seat " & $seat & ": " & decision.failureReason).runeSubStr(0, 2000)
     }
     var final = %*{
       "type": "final",

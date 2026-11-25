@@ -188,7 +188,9 @@ def run_case(game_bin: str, player_bin: str, case_name: str, root: Path, revisio
         assert not (folder / "results.json").exists(), f"{case_name}: results.json must not exist on failure"
         assert (folder / "player_failure.json").exists(), f"{case_name}: player_failure.json missing"
         failure = json.loads((folder / "player_failure.json").read_text(encoding="utf-8"))
-        assert failure["slot"] == 0, f"{case_name}: expected failure on seat 0, got {failure}"
+        assert set(failure) == {"failed_policy_index", "message"}, failure
+        assert failure["failed_policy_index"] == 0, failure
+        assert failure["message"].startswith("seat 0: ") and len(failure["message"]) <= 2000, failure
         assert traj_events[-1]["status"] == "failed", f"{case_name}: expected failed trajectory"
         assert traj_events[-1]["participant_outcomes"] == {}, f"{case_name}: expected empty participant_outcomes"
         if case_name in ("invalid", "refusal"):
