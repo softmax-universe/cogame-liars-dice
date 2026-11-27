@@ -108,6 +108,8 @@ def run_case(game_bin: str, player_bin: str, case_name: str, root: Path, revisio
         "llmTimeoutSeconds": 10,
         "player_connect_timeout_seconds": 15,
     }
+    if case_name == "valid":
+        config["maxOutputTokens"] = 731
     config_path = folder / "config.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
@@ -177,6 +179,7 @@ def run_case(game_bin: str, player_bin: str, case_name: str, root: Path, revisio
         if mock_log.exists()
         else []
     )
+    assert all(call["max_tokens"] == config.get("maxOutputTokens", 900) for call in calls)
     traj_events = [
         json.loads(line)
         for line in (folder / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()

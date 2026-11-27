@@ -40,7 +40,6 @@ bid honestly on it later. Keep in your notes, per opponent, how often their bids
 turned out false and whether their talk matched their hands.
 """
   DefaultLlmModel = "anthropic/claude-haiku-4.5"
-  DefaultMaxTokens = 900
   DefaultTimeoutSeconds = 30
   OpenRouterCompletionsUrl = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -49,7 +48,6 @@ type
     url: string
     authHeader: string
     model: string
-    maxTokens: int
     timeoutSeconds: int
     temperature: float
 
@@ -87,9 +85,6 @@ proc loadModelTransport(): ModelTransport =
   if temp < 0 or temp > 1 or classify(temp) in {fcNan, fcInf, fcNegInf}:
     raise newException(ValueError,
       "COWORLD_LLM_TEMPERATURE must be finite and between zero and one")
-  let maxTok =
-    try: parseInt(getEnv("COWORLD_LLM_MAX_TOKENS", $DefaultMaxTokens).strip())
-    except ValueError: DefaultMaxTokens
   let timeoutSec =
     try: parseInt(getEnv("COWORLD_LLM_TIMEOUT_SECONDS", $DefaultTimeoutSeconds).strip())
     except ValueError: DefaultTimeoutSeconds
@@ -97,7 +92,6 @@ proc loadModelTransport(): ModelTransport =
     url: url,
     authHeader: authHeader,
     model: if model.len > 0: model else: DefaultLlmModel,
-    maxTokens: max(64, maxTok),
     timeoutSeconds: max(5, timeoutSec),
     temperature: temp
   )
@@ -121,7 +115,7 @@ proc extractMessageText(choice: JsonNode): string =
     return
   raise newException(ValueError, "unsupported chat completion content type")
 
-proc callModelOnce(curl: Curly, transport: ModelTransport, slot: int,
+proc callModelOnce(curl: Curly, transport: ModelTransport, slot, maxTokens: int,
     systemPrompt, userPrompt: string,
     rawBody: var string): tuple[action: JsonNode, servedModel: string] =
   if transport.url.len == 0:
@@ -132,7 +126,7 @@ proc callModelOnce(curl: Curly, transport: ModelTransport, slot: int,
       {"role": "system", "content": systemPrompt},
       {"role": "user", "content": userPrompt}
     ],
-    "max_tokens": transport.maxTokens,
+    "max_tokens": maxTokens,
     "temperature": transport.temperature
   }
   var headers: HttpHeaders
@@ -246,7 +240,7 @@ when isMainModule:
           let userText = inputNode["user"].getStr()
           var rawBody = ""
           try:
-            let reply = callModelOnce(curl, transport, seatSlot, sysText, userText, rawBody)
+            let reply = callModelOnce(curl, transport, seatSlot, payload["max_tokens"].getInt(), sysText, userText, rawBody)
             socket.send($ %*{
               "type": "action",
               "event": eventId,
