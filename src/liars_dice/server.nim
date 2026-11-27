@@ -485,7 +485,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           state.pendingFailure = ""
           state.pendingSubmitted = ""
           state.playerSockets[turn.seat].send($ %*{
-            "type": "observation", "event": state.awaitingEvent,
+            "type": "observation", "event": state.awaitingEvent, "max_tokens": config.maxOutputTokens,
             "observation": state.sim.decisionObservation(turn.seat, seatPrompt)})
 
       ## The slow part (Claude / external player) runs outside the lock on a

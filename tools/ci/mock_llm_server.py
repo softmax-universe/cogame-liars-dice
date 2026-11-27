@@ -101,6 +101,7 @@ def make_handler(reply_mode: str, log_path: Path | None):
                                 "slot": self.headers.get("X-Coworld-Player-Slot"),
                                 "model": req.get("model"),
                                 "is_opening": is_opening,
+                                "max_tokens": req["max_tokens"],
                                 "reply_mode": reply_mode,
                             }
                         )
